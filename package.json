@@ -1,0 +1,16 @@
+{
+  "name": "portfolio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web app for Pokémon TCG collectors and players: track your collection's value and performance (unofficial)",
+  "scripts": {
+    "db:new": "dbmate --migrations-dir db/migrations new",
+    "db:up": "dbmate --migrations-dir db/migrations --no-dump-schema up",
+    "db:down": "dbmate --migrations-dir db/migrations --no-dump-schema down",
+    "db:status": "dbmate --migrations-dir db/migrations status"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "dbmate": "^2.37.0"
+  }
+}
