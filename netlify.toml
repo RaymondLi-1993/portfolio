@@ -1,0 +1,16 @@
+# Netlify config. The web build (command + publish dir) gets added with the web layer.
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  # Each file in this folder becomes one function, named after the file (api.ts → "api").
+  directory = "api/netlify/functions"
+  node_bundler = "esbuild"
+
+# Send every /api/* request to the "api" function. status = 200 makes it a rewrite:
+# the browser keeps the /api/... URL and never sees /.netlify/functions/api.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
