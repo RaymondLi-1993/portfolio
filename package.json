@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "description": "Web app for Pokémon TCG collectors and players: track your collection's value and performance (unofficial)",
+  "workspaces": [
+    "api"
+  ],
   "scripts": {
+    "dev:api": "npm run dev --workspace api",
     "db:new": "dbmate --migrations-dir db/migrations new",
     "db:up": "dbmate --migrations-dir db/migrations --no-dump-schema up",
     "db:down": "dbmate --migrations-dir db/migrations --no-dump-schema down",
