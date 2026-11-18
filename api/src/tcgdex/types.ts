@@ -13,10 +13,10 @@ export interface TcgdexSeriesBrief {
   name: string; // "Sword & Shield"
 }
 
-/** GET /series/:id (unverified) */
+/** GET /series/:id (checked against GET /series/sv on 2026-11-18) */
 export interface TcgdexSeries extends TcgdexSeriesBrief {
-  releaseDate?: string; // unverified: "2019-11-15"
-  sets: TcgdexSetBrief[];
+  releaseDate?: string; // the SERIES' date (start of the era): "2023-03-31"
+  sets: TcgdexSetBrief[]; // in release order. NOTE: these entries have NO releaseDate (only GET /sets/:id does)
 }
 
 // ── Sets ─────────────────────────────────────────────────────────────────────
