@@ -9,20 +9,44 @@ import type { TcgdexCard, TcgdexSeries, TcgdexSeriesBrief, TcgdexSet } from "./t
  */
 const BASE_URL = "https://api.tcgdex.net/v2/en";
 
+// Rate limit: request STARTS are at least this far apart. Calls that come too soon wait
+// their turn (they're delayed, never dropped). Fine for our sync, which awaits one request
+// before making the next. If we ever fetch in parallel, this needs a real queue.
+const MIN_GAP_MS = 1000;
+let lastRequestAt = 0; // module-level: shared by every call (0 = no request yet)
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Wait until at least MIN_GAP_MS has passed since the previous request started. */
+async function waitForTurn(): Promise<void> {
+  const wait = lastRequestAt + MIN_GAP_MS - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastRequestAt = Date.now();
+}
+
+const TIMEOUT_MS = 10_000; // give up on a request that hasn't answered in 10s
+
 /**
  * GET a TCGdex path (e.g. "/cards/sv08-238") and return the parsed JSON.
  *
- * TODO(you):
- *   1. Throttle: wait so that requests start at least ~1000 ms apart, across ALL calls
- *      (keep the time of the last request in a module-level variable).
- *   2. fetch(`${BASE_URL}${path}`).
- *   3. 404 → return null (the thing doesn't exist; the caller decides what to do).
- *   4. Other non-2xx, or a network error → retry a few times with a growing delay
- *      (e.g. 2s, 4s, 8s), then throw an Error that includes the path and status.
- *   5. Parse the JSON and return it as T.
+ * - 2xx → the parsed JSON
+ * - 404 → null (it doesn't exist; the caller decides what to do)
+ * - any other status, network error, timeout → throws (no retries: that's the caller's job)
  */
 export async function tcgdexGet<T>(path: string): Promise<T | null> {
-  throw new Error(`Not implemented: tcgdexGet(${path})`);
+  await waitForTurn(); // rate limit
+
+  // fetch throws only when there's NO response (network down, DNS, timeout).
+  // An HTTP error status (404, 500…) is a normal response: we check it ourselves below.
+  const result = await fetch(`${BASE_URL}${path}`, {
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+
+  // Check 404 BEFORE `ok`: a 404 isn't ok, but it's an answer, not a failure.
+  if (result.status === 404) return null;
+  if (result.ok) return (await result.json()) as T;
+
+  throw new Error(`TCGdex GET ${path} failed: ${result.status} ${result.statusText}`);
 }
 
 /** One helper per endpoint we use. Ids go through encodeURIComponent (set ids can contain dots). */
