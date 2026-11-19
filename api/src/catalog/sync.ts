@@ -91,7 +91,9 @@ export async function syncCatalog(options: SyncOptions = {}): Promise<void> {
  *   2. For each kept series id (a for…of loop, so requests stay one at a time):
  *        const series = await tcgdex.getSeries(id)   (null → log it and skip this series)
  *        const seriesRow = toSeriesRow(series), setRows = toSetRows(series)
- *        Write both in ONE transaction (the series row FIRST: sets.series_id points at it):
+ *        Write the series row FIRST (sets.series_id points at it), then its sets. Each upsert is
+ *        its own pool.query (no transaction: decided 2026-11-18; if a run fails partway, the
+ *        re-run fills in anything missing, since the upserts are idempotent):
  *          a. upsert the series row, with its era from our map (SERIES_ERAS[row.id] ?? null):
  *               insert into series (id, name, release_date, era) values ($1, $2, $3, $4)
  *               on conflict (id) do update set name = excluded.name,
@@ -114,6 +116,7 @@ async function syncSeriesAndSets(): Promise<void> {
   if (!allSeries) throw new Error("There was a failure fetching the list series from tcgdex");
 
   let saved = 0;
+  let setsSaved = 0;
 
   for (const { id, name } of allSeries) {
     if (SKIPPED_SERIES.has(id)) continue;
@@ -126,6 +129,9 @@ async function syncSeriesAndSets(): Promise<void> {
 
     const row = toSeriesRow(series);
     const era = SERIES_ERAS[row.id] ?? null;
+    const setRows = toSetRows(series);
+
+    // The series row FIRST: each set's series_id must point at an existing series row.
     await pool.query(
       `insert into series (id, name, release_date, era)
        values ($1, $2, $3, $4)
@@ -136,9 +142,23 @@ async function syncSeriesAndSets(): Promise<void> {
       [row.id, row.name, row.releaseDate, era],
     );
 
+    // Then this series' sets. release_date and synced_at aren't listed, so the upsert never
+    // touches them: the card step owns those.
+    for (const set of setRows) {
+      await pool.query(
+        `insert into sets (id, series_id, name)
+         values ($1, $2, $3)
+         on conflict (id) do update
+           set series_id = excluded.series_id,
+               name = excluded.name`,
+        [set.id, set.seriesId, set.name],
+      );
+    }
+
     saved++;
-    console.log(`series ${row.id}: saved (${era ?? "no era"})`);
+    setsSaved += setRows.length;
+    console.log(`series ${row.id}: saved (${era ?? "no era"}), ${setRows.length} sets`);
   }
 
-  console.log(`Series done: ${saved} saved`);
+  console.log(`Series done: ${saved} series, ${setsSaved} sets saved`);
 }
