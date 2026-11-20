@@ -1,6 +1,8 @@
 import { pool } from "../db/pool";
 import { tcgdex } from "../tcgdex/client";
-import { toCardRow, toPrices, toPrintings, toSeriesRow, toSetRows } from "./map";
+import { sleep } from "../utils/sleep";
+import { toCardRow, toPrices, toPrintings, toSeriesRow, toSetRows} from "./map";
+import type { CardRow, PriceRow, Printing } from "./map";
 
 /**
  * TCGdex series we don't sync (yet). Data, not scattered ifs: edit this list to change it.
@@ -71,14 +73,126 @@ export interface SyncOptions {
 
 
 export async function syncCatalog(options: SyncOptions = {}): Promise<void> {
-  // Slice 1: series + sets only (steps 1–2 above). Cards come in the next slice.
+  // Steps 1–2: series + sets (every run: cheap, and how new sets are discovered).
   await syncSeriesAndSets();
 
-  // These references only keep the imports "used" until the card steps (3–5) are written.
-  void toCardRow;
-  void toPrintings;
-  void toPrices;
-  console.log(`Card sync not built yet (options: ${JSON.stringify(options)}).`);
+  // Step 4, one set at a time. For now only with --set; picking every unsynced set comes later.
+  if (options.setId) {
+    await syncSetCards(options.setId);
+  } else {
+    console.log("Card sync for all sets not built yet: run with --set <id> (e.g. --set sv08).");
+  }
+}
+
+/** Everything one set's card step collects before writing (part 2 writes it in one transaction). */
+interface CollectedSet {
+  setId: string;
+  releaseDate: string | null; // from GET /sets/:id: fills sets.release_date
+  cards: CardRow[];
+  printings: { cardId: string; printing: Printing }[]; // card_printings rows
+  prices: (PriceRow & { cardId: string })[]; // prices, still keyed by card + printing (ids come in part 2)
+  failedCards: string[]; // ids of cards that couldn't be fetched or mapped
+}
+
+/**
+ * Step 4 for ONE set: fetch every card, shape it, collect the rows.
+ * PART 1 (now): fetch + map + collect, then log the counts. NO database writes yet.
+ * PART 2 (next): write everything in one transaction, then set release_date and synced_at.
+ *
+ * TODO(you), part 1:
+ *   1. const set = await tcgdex.getSet(setId)   (null → throw: the set doesn't exist on TCGdex)
+ *   2. Start a CollectedSet: { setId, releaseDate: set.releaseDate ?? null, cards: [], printings: [],
+ *      prices: [], failedCards: [] }
+ *   3. For each card brief in set.cards (for…of, so requests stay one at a time, ~1/s):
+ *        try {
+ *          const card = await tcgdex.getCard(brief.id)
+ *          null → console.warn + push brief.id into failedCards + continue
+ *          push toCardRow(card) into cards
+ *          for each printing of toPrintings(card): push { cardId: card.id, printing }
+ *          for each price of toPrices(card):        push { cardId: card.id, ...price }
+ *        } catch (err) {
+ *          console.warn(...) + push brief.id into failedCards   (keep going with the next card)
+ *        }
+ *      Optional: log progress every 25 cards, e.g. "sv08: 50/252", since a set takes minutes.
+ *   4. Log the counts: `${setId}: ${cards} cards, ${printings} printings, ${prices} prices, ${failed} failed`
+ *   5. Return the CollectedSet (part 2 will use it).
+ */
+async function syncSetCards(setId: string): Promise<CollectedSet> {
+  const set = await tcgdex.getSet(setId);
+  if (!set) throw new Error(`There was an error fetching the cards from ${setId}`);
+
+  const collected: CollectedSet = {
+    setId,
+    releaseDate: set.releaseDate ?? null,
+    cards: [],
+    printings: [],
+    prices: [],
+    failedCards: [],
+  };
+
+  // Pass 1: every card in the set. A failure is recorded, and the loop moves on to the next card.
+  for (const brief of set.cards) {
+    const ok = await collectCard(brief.id, collected);
+    if (!ok) collected.failedCards.push(brief.id);
+  }
+
+  // Pass 2: retry ONLY the cards that failed, once, after a short pause. TCGdex's 503s are brief,
+  // so most failures succeed the second time and the set can still finish in this run.
+  // A card that fails again stays in failedCards (likely a real problem): the set stays unsynced.
+  if (collected.failedCards.length > 0) {
+    const toRetry = collected.failedCards;
+    collected.failedCards = [];
+    console.log(`${setId}: retrying ${toRetry.length} failed card(s) in ${RETRY_PAUSE_MS / 1000}s…`);
+    await sleep(RETRY_PAUSE_MS);
+
+    for (const cardId of toRetry) {
+      const ok = await collectCard(cardId, collected);
+      if (!ok) collected.failedCards.push(cardId);
+    }
+  }
+
+  console.log(
+    `${setId}: ${collected.cards.length} cards, ${collected.printings.length} printings, ` +
+      `${collected.prices.length} prices, ${collected.failedCards.length} failed` +
+      (collected.failedCards.length > 0 ? ` (${collected.failedCards.join(", ")})` : ""),
+  );
+
+  return collected;
+}
+
+const RETRY_PAUSE_MS = 5_000;
+
+/**
+ * Fetch ONE card, shape it, and add its rows to `collected`.
+ * Returns true if it worked, false if it didn't (logged here; the caller decides what to record).
+ * Never throws: one bad card must not stop the set.
+ */
+async function collectCard(cardId: string, collected: CollectedSet): Promise<boolean> {
+  try {
+    const card = await tcgdex.getCard(cardId); // the FULL card (the set only gave us a brief)
+    if (!card) {
+      console.warn(`${cardId}: not found on TCGdex`);
+      return false;
+    }
+
+    // Map everything BEFORE pushing anything: if a mapper throws, nothing half-added is left behind.
+    const cardRow = toCardRow(card);
+    const printings = toPrintings(card);
+    const prices = toPrices(card);
+
+    collected.cards.push(cardRow);
+    for (const printing of printings) {
+      collected.printings.push({ cardId: card.id, printing });
+    }
+    for (const price of prices) {
+      collected.prices.push({ cardId: card.id, ...price });
+    }
+    return true;
+  } catch (err) {
+    // A TCGdex error (503, timeout…) or bad data a mapper rejected. Record it; don't stop the set.
+    console.warn(`${cardId}: failed (${err instanceof Error ? err.message : String(err)})`);
+    return false;
+  }
 }
 
 /**
