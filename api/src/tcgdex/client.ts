@@ -1,3 +1,4 @@
+import { sleep } from "../utils/sleep";
 import type { TcgdexCard, TcgdexSeries, TcgdexSeriesBrief, TcgdexSet } from "./types";
 
 /**
@@ -15,7 +16,6 @@ const BASE_URL = "https://api.tcgdex.net/v2/en";
 const MIN_GAP_MS = 1000;
 let lastRequestAt = 0; // module-level: shared by every call (0 = no request yet)
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Wait until at least MIN_GAP_MS has passed since the previous request started. */
 async function waitForTurn(): Promise<void> {

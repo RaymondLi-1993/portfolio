@@ -23,6 +23,27 @@ export interface SetRow {
   name: string; // "Surging Sparks"
 }
 
+/** One row of our `cards` table (column names in camelCase; sync.ts maps them to SQL). */
+export interface CardRow {
+  id: string; // "sv08-238"
+  setId: string; // "sv08"
+  number: string; // "238" (TCGdex's localId)
+  name: string; // "Pikachu ex"
+  rarity: string | null;
+  regulationMark: string | null;
+  legalStandard: boolean | null;
+  imagePath: string | null; // "en/sv/sv08/238": the PATH only; the API builds the URL (images-off switch)
+  tcgplayerProductId: number | null;
+}
+
+/** The current TCGplayer market price of one printing (one row of our `prices` table, minus the id). */
+export interface PriceRow {
+  printing: Printing; // sync.ts turns this into the printing's id
+  marketPrice: number | null; // USD; null = TCGplayer has no market price right now
+  sourceUpdatedAt: string | null; // TCGdex's pricing.tcgplayer.updated (ISO): the "as of" date
+}
+
+
 /** TCGdex series → our `series` row. */
 export function toSeriesRow(series: TcgdexSeries): SeriesRow {
   return {
@@ -41,18 +62,7 @@ export function toSetRows(series: TcgdexSeries): SetRow[] {
   }));
 }
 
-/** One row of our `cards` table (column names in camelCase; sync.ts maps them to SQL). */
-export interface CardRow {
-  id: string; // "sv08-238"
-  setId: string; // "sv08"
-  number: string; // "238" (TCGdex's localId)
-  name: string; // "Pikachu ex"
-  rarity: string | null;
-  regulationMark: string | null;
-  legalStandard: boolean | null;
-  imagePath: string | null; // "en/sv/sv08/238": the PATH only; the API builds the URL (images-off switch)
-  tcgplayerProductId: number | null;
-}
+
 
 /** The printing values our `card_printings.printing` check constraint allows. */
 export type Printing =
@@ -63,6 +73,11 @@ export type Printing =
   | "1st_edition_holofoil"
   | "unlimited_holofoil";
 
+const PRINTING_BY_TCGPLAYER_KEY: Record<string, Printing> = {
+  normal: "normal",
+  holofoil: "holofoil",
+  "reverse-holofoil": "reverse_holofoil",
+};
 /**
  * TODO(you): TCGdex card → CardRow.
  *   - number ← card.localId
@@ -117,7 +132,7 @@ export function toCardRow(card: TcgdexCard): CardRow {
 }
 
 /**
- * TODO(you): which printings exist for this card.
+ * Which printings exist for this card.
  *   - Source: the printing keys in card.pricing.tcgplayer ("normal", "holofoil", "reverse-holofoil")
  *     → our values ("normal", "holofoil", "reverse_holofoil").
  *   - DECIDED: printings come from the pricing keys only. Vintage (where TCGdex merges
@@ -130,15 +145,34 @@ export function toCardRow(card: TcgdexCard): CardRow {
  *   - Neither source gives anything → [] (the card is searchable but can't be added).
  */
 export function toPrintings(card: TcgdexCard): Printing[] {
-  throw new Error(`Not implemented: toPrintings(${card.id})`);
+  // 1. Main source: the printing keys in pricing.tcgplayer, translated to our names.
+  //    flatMap: return [x] to keep x, [] to drop the key; the results are joined into one array.
+  //    (Inside a callback, `return []` plays the role `continue` plays in a for loop.)
+  const printings = Object.keys(card.pricing?.tcgplayer ?? {}).flatMap((key) => {
+    if (key === "unit" || key === "updated") return []; // not printings: skip silently
+
+    const printing = PRINTING_BY_TCGPLAYER_KEY[key];
+    if (!printing) {
+      // A key we don't model yet: skip it, but say so (the first full run shows which ones exist).
+      console.warn(`${card.id}: unknown printing key "${key}", skipped`);
+      return [];
+    }
+    return [printing];
+  });
+
+  if (printings.length > 0) return printings;
+
+  // 2. Fallback: no TCGplayer pricing → TCGdex's variant flags, so the card can still be added.
+  //    (firstEdition is ignored: vintage isn't synced.)
+  const fallback: Printing[] = [];
+  if (card.variants?.normal) fallback.push("normal");
+  if (card.variants?.holo) fallback.push("holofoil");
+  if (card.variants?.reverse) fallback.push("reverse_holofoil");
+
+  // 3. Neither source gave anything → [] (the card is still saved and searchable, just not addable).
+  return fallback;
 }
 
-/** The current TCGplayer market price of one printing (one row of our `prices` table, minus the id). */
-export interface PriceRow {
-  printing: Printing; // sync.ts turns this into the printing's id
-  marketPrice: number | null; // USD; null = TCGplayer has no market price right now
-  sourceUpdatedAt: string | null; // TCGdex's pricing.tcgplayer.updated (ISO): the "as of" date
-}
 
 /**
  * TODO(you): the card's current prices, one per printing (the catalog sync's starting prices;
@@ -152,11 +186,18 @@ export interface PriceRow {
  */
 export function toPrices(card: TcgdexCard): PriceRow[] {
 
-  if (!card.localId || !card.name || !card.set?.id) {
-    throw new Error(`TCGdex card ${card.id} is missing a required field (localId, name or set.id)`);
-  }
+  const tcgplayer = card.pricing?.tcgplayer;     
+  if (!tcgplayer) return [];
 
-  
+  const prices = Object.entries(card.pricing?.tcgplayer ?? {}).flatMap(([key, value]) => {
 
-  throw new Error(`Not implemented: toPrices(${card.id})`);
+   const printing = PRINTING_BY_TCGPLAYER_KEY[key];
+   if(!printing) return [];
+   if (typeof value !== "object" || value === null) return []; 
+
+   return [{printing, marketPrice: value.marketPrice ?? null, sourceUpdatedAt: tcgplayer.updated ?? null }] 
+  })
+
+
+  return prices;
 }
