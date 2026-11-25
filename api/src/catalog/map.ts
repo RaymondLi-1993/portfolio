@@ -79,13 +79,9 @@ const PRINTING_BY_TCGPLAYER_KEY: Record<string, Printing> = {
   "reverse-holofoil": "reverse_holofoil",
 };
 /**
- * TODO(you): TCGdex card → CardRow.
- *   - number ← card.localId
- *   - setId ← card.set.id
- *   - imagePath ← card.image without "https://assets.tcgdex.net/" (null if there's no image)
- *   - legalStandard ← card.legal?.standard
- *   - tcgplayerProductId ← a productId from card.pricing.tcgplayer (which printing's? usually they match)
- *   - missing optional fields → null (our columns allow null)
+ * TCGdex card → CardRow. Throws if a required field is missing; optional fields become null.
+ * tcgplayerProductId comes from the first printing block in pricing.tcgplayer (a card's
+ * printings usually share one productId).
  */
 export function toCardRow(card: TcgdexCard): CardRow {
 
@@ -175,13 +171,11 @@ export function toPrintings(card: TcgdexCard): Printing[] {
 
 
 /**
- * TODO(you): the card's current prices, one per printing (the catalog sync's starting prices;
- * the daily price job keeps them current later).
- *   - Source: the same printing blocks as toPrintings, in card.pricing.tcgplayer
- *     (e.g. holofoil: { marketPrice: 227.31, … }), and its `updated` for sourceUpdatedAt.
- *   - Use the SAME printing-key mapping as toPrintings ("reverse-holofoil" → "reverse_holofoil"),
- *     so every price points at a printing that exists. A shared helper avoids writing it twice.
- *   - Only marketPrice (never low/mid/high: CLAUDE.md uses TCGplayer market price).
+ * The card's current prices, one per printing (the catalog sync's starting prices; the daily
+ * price job keeps them current later).
+ *   - Uses the same printing-key mapping as toPrintings, so every price points at a printing
+ *     that exists.
+ *   - Only marketPrice (never low/mid/high: we use the TCGplayer market price).
  *   - No tcgplayer pricing → [] (no prices; the printings may still exist).
  */
 export function toPrices(card: TcgdexCard): PriceRow[] {
