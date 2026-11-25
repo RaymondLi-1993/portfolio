@@ -1,7 +1,13 @@
 import { pool } from "../db/pool";
 import { tcgdex } from "../tcgdex/client";
 import { sleep } from "../utils/sleep";
-import { insertPrintings, upsertCards, upsertPrices, updateSetRow } from "./db";
+import {
+  insertPrintings,
+  listUnsyncedSets,
+  upsertCards,
+  upsertPrices,
+  updateSetRow,
+} from "./db";
 import {
   toCardRow,
   toPrices,
@@ -59,30 +65,100 @@ export interface SyncOptions {
  *
  * Steps:
  *   1–2. syncSeriesAndSets: upsert every series (era from SERIES_ERAS) and its sets.
- *   3.   Pick the sets to sync (for now: only --set).
- *   4.   For each set: syncSetCards fetches and shapes its cards (~1 card/s, no writes), then
- *        writeSet saves them in one transaction. synced_at is set only if no card failed, so
- *        the next run fetches an incomplete set again (re-saving the good cards is harmless).
- *
- * TODO (not built yet):
- *   - Without --set: sync every set where synced_at is null, ordered by release_date.
- *   - Per-set try/catch: a failing set is logged, recorded and skipped; the run continues.
- *     Log progress, e.g. "sv08 (12/221): 252 cards".
- *   - A summary at the end (sets synced, cards, printings, prices, failed sets/cards, time
- *     taken). If anything failed, throw so the script exits with code 1.
+ *   3.   Pick the sets to sync: [--set] if given, otherwise every set not synced yet.
+ *   4.   syncSets: for each set, syncSetCards fetches and shapes its cards (~1 card/s, no
+ *        writes), then writeSet saves them in one transaction. synced_at is set only if no card
+ *        failed, so the next run fetches an incomplete set again (re-saving good cards is harmless).
  */
-
 export async function syncCatalog(options: SyncOptions = {}): Promise<void> {
   // Steps 1–2: series + sets (every run: cheap, and how new sets are discovered).
   await syncSeriesAndSets();
 
-  // Step 4, one set at a time. For now only with --set; picking every unsynced set comes later.
-  if (options.setId) {
-    const collected = await syncSetCards(options.setId); // part 1: fetch + shape (no writes)
-    await writeSet(collected); // part 2: write it all in one transaction
-  } else {
-    console.log(
-      "Card sync for all sets not built yet: run with --set <id> (e.g. --set sv08).",
+  // Step 3: which sets. --set re-syncs that one set even if it's already synced.
+  const setIds = options.setId ? [options.setId] : await listUnsyncedSets(pool);
+
+  // Step 4.
+  await syncSets(setIds);
+}
+
+/**
+ * Step 4: sync every set in `setIds`, one after another. A failing set is logged and skipped;
+ * the run goes on. Logs progress, then a summary (time, sets, cards, failed and incomplete sets).
+ *
+ * @param setIds the sets to sync, in order
+ * @throws if any set failed or was incomplete, so the script exits with code 1
+ */
+async function syncSets(setIds: string[]): Promise<void> {
+  const results = {
+    failedSets: [] as string[],
+    incompleteSets: [] as { setId: string; cardIds: string[] }[],
+    time: Date.now(),
+    setsSynced: 0,
+    cards: 0,
+  };
+
+  if (setIds.length === 0) {
+    console.log("Nothing to sync: every set is already synced.");
+    return;
+  }
+
+  for (const [i, setId] of setIds.entries()) {
+    console.log(`${setId} (${i + 1}/${setIds.length})…`);
+    try {
+      const collected = await syncSetCards(setId);
+      await writeSet(collected);
+      results.setsSynced++;
+      results.cards += collected.cards.length;
+
+      if (collected.failedCards.length > 0) {
+        results.incompleteSets.push({
+          setId: setId,
+          cardIds: collected.failedCards,
+        });
+      }
+    } catch (e) {
+      // The whole set failed (fetch, 404 or the save transaction): nothing was saved and the set
+      // stays unsynced, so the next run tries it again. Record it, say why, move on.
+      const reason = e instanceof Error ? e.message : String(e);
+      // writeSet wraps the real database error in `cause`: show it, or you only see "Failed to save".
+      const cause =
+        e instanceof Error && e.cause instanceof Error
+          ? ` (cause: ${e.cause.message})`
+          : "";
+      console.warn(`${setId}: failed: ${reason}${cause}`);
+      results.failedSets.push(setId);
+    }
+  }
+
+  const elapsedTime = Date.now() - results.time;
+  const totalSeconds = Math.round(elapsedTime / 1000); // ms → seconds
+  const hours = Math.floor(totalSeconds / 3600); // full hours
+  const minutes = Math.floor((totalSeconds % 3600) / 60); // full minutes left over after the hours
+  const seconds = totalSeconds % 60;
+
+  console.log(
+    `Here are the results of the sync duration ${hours}h ${minutes}m ${seconds}s, total sets synced ${results.setsSynced} and cards synced ${results.cards}`,
+  );
+
+  // Which sets need attention: printed only when there are any, so a clean run stays one line.
+  if (results.failedSets.length > 0) {
+    console.warn(
+      `Failed (${results.failedSets.length}): ${results.failedSets.join(", ")}`,
+    );
+  }
+  if (results.incompleteSets.length > 0) {
+    const list = results.incompleteSets
+      .map(({ setId, cardIds }) => `${setId} (${cardIds.join(", ")})`)
+      .join("; ");
+    console.warn(`Incomplete (${results.incompleteSets.length}): ${list}`);
+  }
+
+  // Anything failed or incomplete → end the run as an error, so the script exits with code 1.
+  // Both kinds keep synced_at null, so the next run picks them up again.
+  if (results.failedSets.length > 0 || results.incompleteSets.length > 0) {
+    throw new Error(
+      `${results.failedSets.length} set(s) failed, ${results.incompleteSets.length} incomplete. ` +
+        "Re-run to retry them.",
     );
   }
 }

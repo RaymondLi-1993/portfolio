@@ -114,6 +114,23 @@ export async function upsertPrices(
 }
 
 /**
+ * @param db a pool or transaction
+ * @returns ["sv01", "sv02"]
+ * Fetches a set of ids and returns an array of those ids
+ */
+export async function listUnsyncedSets(db: Db): Promise<string[]> {
+  const sql = `
+    select id from sets
+    where synced_at is null
+    order by release_date asc, id asc
+  `;
+
+  const { rows } = await db.query<{ id: string }>(sql);
+
+  return rows.map((row) => row.id);
+}
+
+/**
  * Fill in the set's release date, and mark it synced only if nothing failed.
  * `synced` false → synced_at keeps its old value, so the next run fetches the set again.
  */
@@ -126,7 +143,7 @@ export async function updateSetRow(
   const sql = `
     update sets
     set release_date = $1,
-        synced_at    = case when $2 then now() else synced_at end
+           synced_at = case when $2 then now() else synced_at end
     where id = $3
   `;
 
